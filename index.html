@@ -140,11 +140,13 @@ body::before{content:'';position:fixed;top:0;left:0;right:0;bottom:0;background:
 </div>
 </div>
 <div class="rec-overlay" id="recOverlay">
-<div class="rec-timer" id="recTimer">00:00</div>
+<div class="rec-timer" id="recTimer">🔴 LIVE 00:00</div>
 <video class="rec-preview" id="recPreview" autoplay muted playsinline></video>
+<div class="live-vision-info" id="liveInfo">
+👁️ البوت كيشوف شاشتك دلوا<Br>تهضر معاه بالصوت وهو كيجاوبك
+</div>
 <div class="rec-controls">
-<button class="rec-btn stop" id="recStopBtn" onclick="stopScreenRecord()">⏹️ إيقاف</button>
-<button class="rec-btn cancel" onclick="cancelScreenRecord()">❌ إلغاء</button>
+<button class="rec-btn stop" id="recStopBtn" onclick="stopScreenRecord()">⏹️ إيقاف الرؤية</button>
 </div>
 </div>
 <div id="modalRoot"></div>
@@ -357,170 +359,203 @@ function toggleMic(){
   }
 }
 
-// ===== SCREEN RECORDING =====
+// ===== LIVE VISION MODE (like Grok) =====
+var liveVisionActive=false;
+var liveVideo=null;
+var liveCanvas=null;
+var liveCtx=null;
+var liveRec=null;
+var liveSilentCount=0;
+
 function startScreenRecord(){
-  if(!navigator.mediaDevices){
-    showToast('المتصفح لا يدعم تسجيل الشاشة');
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getDisplayMedia){
+    showToast('Chrome الخارجي مطلوب لتسجيل الشاشة');
     return;
   }
+  if(liveVisionActive){stopScreenRecord();return}
 
-  // Check if getDisplayMedia is available
-  if(!navigator.mediaDevices.getDisplayMedia){
-    // Fallback: try camera recording on mobile
-    if(navigator.mediaDevices.getUserMedia){
-      showToast('📝 تسجيل الشاشة غير مدعوم، نستخدم الكاميرا بدلاً من ذلك...');
-      startCameraRecord();
-      return;
-    }
-    showToast('المتصفح لا يدعم تسجيل الشاشة. استخدم Chrome');
-    return;
-  }
-
-  // Try screen capture - audio optional for Android compatibility
-  var constraints={video:true,audio:false};
-
-  navigator.mediaDevices.getDisplayMedia(constraints).then(function(stream){
-    // Try to add audio track separately (optional)
-    if(navigator.mediaDevices.getUserMedia){
-      navigator.mediaDevices.getUserMedia({audio:true}).then(function(audioStream){
-        var audioTrack=audioStream.getAudioTracks()[0];
-        if(audioTrack){stream.addTrack(audioTrack)}
-      }).catch(function(){/* audio optional */});
-    }
-
+  // Request screen share - on Android, "Entire screen" keeps stream alive when switching apps
+  navigator.mediaDevices.getDisplayMedia({video:true,audio:false}).then(function(stream){
+    liveVisionActive=true;
     screenStream=stream;
-    screenChunks=[];
 
-    // Find best supported mimeType
-    var mimeType='video/webm;codecs=vp9';
-    if(!MediaRecorder.isTypeSupported(mimeType))mimeType='video/webm;codecs=vp8';
-    if(!MediaRecorder.isTypeSupported(mimeType))mimeType='video/webm';
-    if(!MediaRecorder.isTypeSupported(mimeType))mimeType='video/mp4';
+    // Create hidden video element to hold the stream
+    liveVideo=document.getElementById('recPreview');
+    liveVideo.srcObject=stream;
+    liveVideo.muted=true;
+    liveVideo.play().catch(function(){});
 
-    try{
-      screenRecorder=new MediaRecorder(stream,{mimeType:mimeType});
-    }catch(e){
-      screenRecorder=new MediaRecorder(stream);
-    }
+    // Create canvas for frame capture
+    liveCanvas=document.createElement('canvas');
+    liveCanvas.width=640;
+    liveCanvas.height=360;
+    liveCtx=liveCanvas.getContext('2d');
 
-    screenRecorder.ondataavailable=function(e){
-      if(e.data&&e.data.size>0)screenChunks.push(e.data);
-    };
-
-    screenRecorder.onstop=function(){
-      var blob=new Blob(screenChunks,{type:screenRecorder.mimeType||'video/webm'});
-      var reader=new FileReader();
-      reader.onload=function(ev){
-        var videoData=ev.target.result;
-        var ext='webm';
-        if((screenRecorder.mimeType||'').includes('mp4'))ext='mp4';
-        pendingFile={type:'video',data:videoData,name:'screen-recording.'+ext,mime:screenRecorder.mimeType||'video/webm'};
-        showToast('تم تسجيل الشاشة! اكتب سؤالك وحلله');
-        addMsg('🖥️ [تسجيل شاشة - '+formatTime(recSeconds)+']','user');
-      };
-      reader.readAsDataURL(blob);
-      stream.getTracks().forEach(function(t){t.stop()});
-    };
-
-    // Show preview overlay
+    // Show overlay
     document.getElementById('recOverlay').classList.add('show');
-    var preview=document.getElementById('recPreview');
-    preview.srcObject=stream;
-    preview.play().catch(function(){});
 
-    // Start timer
+    // Timer
     recSeconds=0;
-    document.getElementById('recTimer').textContent='00:00';
     recTimerInt=setInterval(function(){
       recSeconds++;
-      document.getElementById('recTimer').textContent=formatTime(recSeconds);
+      document.getElementById('recTimer').textContent='🔴 LIVE '+formatTime(recSeconds);
     },1000);
 
-    screenRecorder.start(1000);
     document.getElementById('screenBtn').classList.add('recording');
+    addMsg('👁️ *رؤية حية مفعلة*\nالبوت دابا كيشوف شاشتك. تهدّر معاه بالصوت أو اكتب سؤال وهو كيجاوبك بناءً على ما يشوف.','bot');
+
+    // Start voice recognition (continuous)
+    startLiveVoice();
 
     // Handle user stopping from browser UI
     stream.getVideoTracks()[0].onended=function(){
       stopScreenRecord();
     };
 
+    showToast('👁️ رؤية حية مفعلة! تهدّر مع البوت');
+
   }).catch(function(err){
+    liveVisionActive=false;
     if(err.name==='NotAllowedError'){
-      showToast('تم رفض إذن تسجيل الشاشة. سمح للتطبيق بالوصول للشاشة');
-    }else if(err.name==='NotReadableError'){
-      showToast('تعذر الوصول للشاشة. حاول مرة أخرى');
+      showToast('سمح بإذن تسجيل الشاشة - اختار "الشاشة كاملة"');
     }else{
-      // Try camera fallback
-      showToast('تسجيل الشاشة رفض. نجرب الكاميرا...');
-      startCameraRecord();
+      showToast('خطأ: '+err.message);
     }
   });
 }
 
-function startCameraRecord(){
-  navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'},audio:true}).then(function(stream){
-    screenStream=stream;
-    screenChunks=[];
+function startLiveVoice(){
+  var SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+  if(!SR){showToast('الصوت غير مدعوم - اكتب أسئلتك');return}
 
-    var mimeType='video/webm;codecs=vp8';
-    if(!MediaRecorder.isTypeSupported(mimeType))mimeType='video/webm';
+  liveRec=new SR();
+  liveRec.lang='ar-SA';
+  liveRec.continuous=true;
+  liveRec.interimResults=false;
 
-    screenRecorder=new MediaRecorder(stream,{mimeType:mimeType});
-    screenRecorder.ondataavailable=function(e){
-      if(e.data&&e.data.size>0)screenChunks.push(e.data);
-    };
-    screenRecorder.onstop=function(){
-      var blob=new Blob(screenChunks,{type:'video/webm'});
-      var reader=new FileReader();
-      reader.onload=function(ev){
-        pendingFile={type:'video',data:ev.target.result,name:'camera-recording.webm',mime:'video/webm'};
-        showToast('تم التسجيل! اكتب سؤالك وحلله');
-        addMsg('📹 [تسجيل كاميرا - '+formatTime(recSeconds)+']','user');
-      };
-      reader.readAsDataURL(blob);
-      stream.getTracks().forEach(function(t){t.stop()});
-    };
+  liveRec.onresult=function(event){
+    var transcript='';
+    for(var i=event.resultIndex;i<event.results.length;i++){
+      if(event.results[i].isFinal){
+        transcript+=event.results[i][0].transcript;
+      }
+    }
+    if(transcript.trim()){
+      liveSilentCount=0;
+      addMsg(transcript,'user');
+      sendLiveVision(transcript);
+    }
+  };
 
-    document.getElementById('recOverlay').classList.add('show');
-    var preview=document.getElementById('recPreview');
-    preview.srcObject=stream;
-    preview.play().catch(function(){});
+  liveRec.onerror=function(event){
+    if(event.error==='no-speech'){
+      liveSilentCount++;
+    }else if(event.error==='not-allowed'){
+      showToast('سمح بإذن الميكروفون للتهضر مع البوت');
+    }
+  };
 
-    recSeconds=0;
-    document.getElementById('recTimer').textContent='00:00';
-    recTimerInt=setInterval(function(){
-      recSeconds++;
-      document.getElementById('recTimer').textContent=formatTime(recSeconds);
-    },1000);
+  liveRec.onend=function(){
+    // Auto-restart if still in live vision mode
+    if(liveVisionActive){
+      try{setTimeout(function(){try{liveRec.start()}catch(e){}},300)}catch(e){}
+    }
+  };
 
-    screenRecorder.start(1000);
-    document.getElementById('screenBtn').classList.add('recording');
-    stream.getVideoTracks()[0].onended=function(){stopScreenRecord()};
-  }).catch(function(err){
-    showToast('تعذر تشغيل الكاميرا: '+err.message);
-  });
+  // Also request mic permission
+  if(navigator.mediaDevices.getUserMedia){
+    navigator.mediaDevices.getUserMedia({audio:true}).then(function(ms){
+      ms.getTracks().forEach(function(t){t.stop()});
+      try{liveRec.start()}catch(ex){}
+    }).catch(function(){
+      showToast('سمح بإذن الميكروفون من الإعدادات');
+    });
+  }else{
+    try{liveRec.start()}catch(ex){}
+  }
+}
+
+function captureScreenFrame(){
+  if(!liveVideo||!liveCtx)return null;
+  try{
+    var w=liveVideo.videoWidth||640;
+    var h=liveVideo.videoHeight||360;
+    if(w>640){h=Math.round(h*640/w);w=640}
+    liveCanvas.width=w;
+    liveCanvas.height=h;
+    liveCtx.drawImage(liveVideo,0,0,w,h);
+    return liveCanvas.toDataURL('image/jpeg',0.6);
+  }catch(e){return null}
+}
+
+function sendLiveVision(text){
+  if(isProcessing)return;
+  isProcessing=true;
+  addThinking();
+
+  // Capture current screen frame
+  var frame=captureScreenFrame();
+
+  if(frame){
+    // Send to Gemini with screen frame
+    var prompt=text+'\n\n(هذه لقطة من شاشة المستخدم الحالية - حلل ما تراه وأجب على السؤال بناءً على المحتوى المرئي)';
+    var body={contents:[{parts:[{text:prompt},{inline_data:{mime_type:'image/jpeg',data:frame.split(',')[1]}}]}],generationConfig:{temperature:0.4,maxOutputTokens:4096}};
+
+    fetch(GEMINI_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+    .then(function(r){return r.json()})
+    .then(function(data){
+      removeThinking();isProcessing=false;
+      if(data.error){
+        // Fallback to Groq
+        sendLiveToGroq(text);return;
+      }
+      var reply=data.candidates[0].content.parts[0].text;
+      addMsg(reply,'bot');speak(reply);
+    })
+    .catch(function(){
+      removeThinking();isProcessing=false;
+      sendLiveToGroq(text);
+    });
+  }else{
+    // No frame available, use Groq
+    sendLiveToGroq(text);
+  }
+}
+
+function sendLiveToGroq(text){
+  chatHistory.push({role:'user',content:text});
+  if(chatHistory.length>20)chatHistory=chatHistory.slice(-20);
+  var cfg=modePrompts[currentMode]||modePrompts.deep;
+  var sysContext=cfg.system+'\n\nأنت مساعد ذكي يدعم الرؤية الحية. المستجر يشارك شاشتك معك. أجب على أسئلته بمعلومات مرئية واضحة.';
+  var body={model:cfg.model,messages:[{role:'system',content:sysContext}].concat(chatHistory),temperature:cfg.temp,max_tokens:cfg.max};
+
+  fetch(GROQ_URL,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+GROQ_KEY},body:JSON.stringify(body)})
+  .then(function(r){return r.json()})
+  .then(function(data){
+    removeThinking();isProcessing=false;
+    if(data.error){addMsg('خطأ: '+data.error.message,'bot');return}
+    var reply=data.choices[0].message.content;
+    chatHistory.push({role:'assistant',content:reply});
+    if(chatHistory.length>20)chatHistory=chatHistory.slice(-20);
+    addMsg(reply,'bot');speak(reply);
+  })
+  .catch(function(){removeThinking();isProcessing=false;addMsg('تعذر الاتصال. حاول مرة أخرى.','bot')});
 }
 
 function stopScreenRecord(){
-  if(screenRecorder&&screenRecorder.state==='recording'){
-    screenRecorder.stop();
-  }
+  liveVisionActive=false;
+  if(liveRec){try{liveRec.stop()}catch(e){}liveRec=null}
+  if(screenStream){screenStream.getTracks().forEach(function(t){t.stop()})}
   document.getElementById('recOverlay').classList.remove('show');
   document.getElementById('screenBtn').classList.remove('recording');
   if(recTimerInt){clearInterval(recTimerInt);recTimerInt=null}
-  if(screenStream){screenStream.getTracks().forEach(function(t){t.stop()})}
+  if(window.speechSynthesis)speechSynthesis.cancel();
+  addMsg('👁️ تم إيقاف الرؤية الحية.','bot');
+  showToast('تم إيقاف الرؤية الحية');
 }
 
 function cancelScreenRecord(){
-  if(screenRecorder&&screenRecorder.state==='recording'){
-    screenChunks=[];
-    screenRecorder.stop();
-  }
-  document.getElementById('recOverlay').classList.remove('show');
-  document.getElementById('screenBtn').classList.remove('recording');
-  if(recTimerInt){clearInterval(recTimerInt);recTimerInt=null}
-  if(screenStream){screenStream.getTracks().forEach(function(t){t.stop()})}
-  showToast('تم إلغاء التسجيل');
+  stopScreenRecord();
 }
 
 function formatTime(s){
