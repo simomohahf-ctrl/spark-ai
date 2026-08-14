@@ -359,39 +359,66 @@ function toggleMic(){
 
 // ===== SCREEN RECORDING =====
 function startScreenRecord(){
-  if(!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia){
-    showToast('المتصفح لا يدعم تسجيل الشاشة. استخدم Chrome على كمبيوتر');
+  if(!navigator.mediaDevices){
+    showToast('المتصفح لا يدعم تسجيل الشاشة');
     return;
   }
 
-  navigator.mediaDevices.getDisplayMedia({
-    video:{cursor:'always'},
-    audio:true
-  }).then(function(stream){
+  // Check if getDisplayMedia is available
+  if(!navigator.mediaDevices.getDisplayMedia){
+    // Fallback: try camera recording on mobile
+    if(navigator.mediaDevices.getUserMedia){
+      showToast('📝 تسجيل الشاشة غير مدعوم، نستخدم الكاميرا بدلاً من ذلك...');
+      startCameraRecord();
+      return;
+    }
+    showToast('المتصفح لا يدعم تسجيل الشاشة. استخدم Chrome');
+    return;
+  }
+
+  // Try screen capture - audio optional for Android compatibility
+  var constraints={video:true,audio:false};
+
+  navigator.mediaDevices.getDisplayMedia(constraints).then(function(stream){
+    // Try to add audio track separately (optional)
+    if(navigator.mediaDevices.getUserMedia){
+      navigator.mediaDevices.getUserMedia({audio:true}).then(function(audioStream){
+        var audioTrack=audioStream.getAudioTracks()[0];
+        if(audioTrack){stream.addTrack(audioTrack)}
+      }).catch(function(){/* audio optional */});
+    }
+
     screenStream=stream;
     screenChunks=[];
 
+    // Find best supported mimeType
     var mimeType='video/webm;codecs=vp9';
     if(!MediaRecorder.isTypeSupported(mimeType))mimeType='video/webm;codecs=vp8';
     if(!MediaRecorder.isTypeSupported(mimeType))mimeType='video/webm';
+    if(!MediaRecorder.isTypeSupported(mimeType))mimeType='video/mp4';
 
-    screenRecorder=new MediaRecorder(stream,{mimeType:mimeType});
+    try{
+      screenRecorder=new MediaRecorder(stream,{mimeType:mimeType});
+    }catch(e){
+      screenRecorder=new MediaRecorder(stream);
+    }
 
     screenRecorder.ondataavailable=function(e){
       if(e.data&&e.data.size>0)screenChunks.push(e.data);
     };
 
     screenRecorder.onstop=function(){
-      var blob=new Blob(screenChunks,{type:'video/webm'});
+      var blob=new Blob(screenChunks,{type:screenRecorder.mimeType||'video/webm'});
       var reader=new FileReader();
       reader.onload=function(ev){
         var videoData=ev.target.result;
-        pendingFile={type:'video',data:videoData,name:'screen-recording.webm',mime:'video/webm'};
-        showToast('🖥️ تم تسجيل الشاشة! اكتب سؤالك وحلله');
+        var ext='webm';
+        if((screenRecorder.mimeType||'').includes('mp4'))ext='mp4';
+        pendingFile={type:'video',data:videoData,name:'screen-recording.'+ext,mime:screenRecorder.mimeType||'video/webm'};
+        showToast('تم تسجيل الشاشة! اكتب سؤالك وحلله');
         addMsg('🖥️ [تسجيل شاشة - '+formatTime(recSeconds)+']','user');
       };
       reader.readAsDataURL(blob);
-      // Stop all tracks
       stream.getTracks().forEach(function(t){t.stop()});
     };
 
@@ -399,7 +426,7 @@ function startScreenRecord(){
     document.getElementById('recOverlay').classList.add('show');
     var preview=document.getElementById('recPreview');
     preview.srcObject=stream;
-    preview.play();
+    preview.play().catch(function(){});
 
     // Start timer
     recSeconds=0;
@@ -419,10 +446,58 @@ function startScreenRecord(){
 
   }).catch(function(err){
     if(err.name==='NotAllowedError'){
-      showToast('تم رفض إذن تسجيل الشاشة');
+      showToast('تم رفض إذن تسجيل الشاشة. سمح للتطبيق بالوصول للشاشة');
+    }else if(err.name==='NotReadableError'){
+      showToast('تعذر الوصول للشاشة. حاول مرة أخرى');
     }else{
-      showToast('خطأ: '+err.message);
+      // Try camera fallback
+      showToast('تسجيل الشاشة رفض. نجرب الكاميرا...');
+      startCameraRecord();
     }
+  });
+}
+
+function startCameraRecord(){
+  navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'},audio:true}).then(function(stream){
+    screenStream=stream;
+    screenChunks=[];
+
+    var mimeType='video/webm;codecs=vp8';
+    if(!MediaRecorder.isTypeSupported(mimeType))mimeType='video/webm';
+
+    screenRecorder=new MediaRecorder(stream,{mimeType:mimeType});
+    screenRecorder.ondataavailable=function(e){
+      if(e.data&&e.data.size>0)screenChunks.push(e.data);
+    };
+    screenRecorder.onstop=function(){
+      var blob=new Blob(screenChunks,{type:'video/webm'});
+      var reader=new FileReader();
+      reader.onload=function(ev){
+        pendingFile={type:'video',data:ev.target.result,name:'camera-recording.webm',mime:'video/webm'};
+        showToast('تم التسجيل! اكتب سؤالك وحلله');
+        addMsg('📹 [تسجيل كاميرا - '+formatTime(recSeconds)+']','user');
+      };
+      reader.readAsDataURL(blob);
+      stream.getTracks().forEach(function(t){t.stop()});
+    };
+
+    document.getElementById('recOverlay').classList.add('show');
+    var preview=document.getElementById('recPreview');
+    preview.srcObject=stream;
+    preview.play().catch(function(){});
+
+    recSeconds=0;
+    document.getElementById('recTimer').textContent='00:00';
+    recTimerInt=setInterval(function(){
+      recSeconds++;
+      document.getElementById('recTimer').textContent=formatTime(recSeconds);
+    },1000);
+
+    screenRecorder.start(1000);
+    document.getElementById('screenBtn').classList.add('recording');
+    stream.getVideoTracks()[0].onended=function(){stopScreenRecord()};
+  }).catch(function(err){
+    showToast('تعذر تشغيل الكاميرا: '+err.message);
   });
 }
 
