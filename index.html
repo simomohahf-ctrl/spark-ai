@@ -238,16 +238,19 @@ function handleFile(e){
   var file=e.target.files[0];if(!file)return;
   var sz=file.size/1048576;
   if(sz>200){showToast('الملف كبير جدا (200MB max)');return}
-  var r=new FileReader();
   if(file.type.startsWith('image/')){
+    var r=new FileReader();
     r.onload=function(ev){pendingFile={type:'image',data:ev.target.result,name:file.name};showToast('📸 صورة جاهزة')};
     r.readAsDataURL(file);
   }else if(file.type.startsWith('video/')){
-    r.onload=function(ev){pendingFile={type:'video',data:ev.target.result,name:file.name,mime:file.type};showToast('🎬 فيديو جاهز')};
-    r.readAsDataURL(file);
+    // Use createObjectURL instead of readAsDataURL to avoid loading 200MB into memory
+    var blobUrl=URL.createObjectURL(file);
+    pendingFile={type:'video',data:blobUrl,name:file.name,mime:file.type,size:sz,blobUrl:blobUrl};
+    showToast('🎬 فيديو جاهز ('+sz.toFixed(1)+'MB)');
   }else{
-    r.onload=function(ev){pendingFile={type:'text',data:ev.target.result,name:file.name};showToast('📄 ملف جاهز')};
-    r.readAsText(file);
+    var r2=new FileReader();
+    r2.onload=function(ev){pendingFile={type:'text',data:ev.target.result,name:file.name};showToast('📄 ملف جاهز')};
+    r2.readAsText(file);
   }
   e.target.value='';
 }
@@ -668,29 +671,54 @@ function sendWithGeminiImage(text,imgData){
 function sendWithGeminiVideo(text,videoData,mime){
   addThinking();showToast('🎬 جاري معالجة الفيديو...');
   var video=document.createElement('video');video.style.display='none';video.src=videoData;video.muted=true;video.playsInline=true;document.body.appendChild(video);
+  var seekTimeout=null;
   video.onloadeddata=function(){
     var canvas=document.createElement('canvas');var ctx=canvas.getContext('2d');var frames=[];
-    var durations=[0,0.2,0.4,0.6,0.8];var idx=0;
+    // 10 frames for better analysis (was 5)
+    var numFrames=10;var durations=[];for(var i=0;i<numFrames;i++){durations.push(i/(numFrames-1))}
+    var idx=0;
     function captureFrame(){
-      if(idx>=durations.length){document.body.removeChild(video);sendVideoFrames(text,frames);return}
-      try{video.currentTime=video.duration*durations[idx]}catch(e){document.body.removeChild(video);removeThinking();isProcessing=false;addMsg('تعذر معالجة الفيديو.','bot')}
+      if(idx>=durations.length){
+        document.body.removeChild(video);
+        if(videoData.startsWith('blob:'))URL.revokeObjectURL(videoData);
+        sendVideoFrames(text,frames);
+        return;
+      }
+      try{
+        video.currentTime=video.duration*durations[idx];
+        seekTimeout=setTimeout(function(){
+          // Skip this frame if seek takes too long
+          idx++;captureFrame();
+        },3000);
+      }catch(e){
+        document.body.removeChild(video);
+        if(videoData.startsWith('blob:'))URL.revokeObjectURL(videoData);
+        removeThinking();isProcessing=false;addMsg('تعذر معالجة الفيديو.','bot');
+      }
     }
     video.onseeked=function(){
+      if(seekTimeout)clearTimeout(seekTimeout);
       try{
         canvas.width=video.videoWidth>640?640:video.videoWidth;
         canvas.height=canvas.width*(video.videoHeight/video.videoWidth);
         ctx.drawImage(video,0,0,canvas.width,canvas.height);
-        frames.push(canvas.toDataURL('image/jpeg',0.7));
+        frames.push(canvas.toDataURL('image/jpeg',0.6));
       }catch(e){}
       idx++;captureFrame();
     };
     captureFrame();
   };
-  video.onerror=function(){document.body.removeChild(video);removeThinking();isProcessing=false;addMsg('تعذر معالجة الفيديو.','bot')};
+  video.onerror=function(){
+    document.body.removeChild(video);
+    if(videoData.startsWith('blob:'))URL.revokeObjectURL(videoData);
+    removeThinking();isProcessing=false;addMsg('تعذر تحميل الفيديو. تأكد من صحة الملف.','bot');
+  };
 }
 
 function sendVideoFrames(text,frames){
-  var prompt=text||'حلل هذه اللقطات من فيديو. صف ما يحدث بدقة وموضوعية. لا تخمن أسماء الأفلام أو المسلسلات.';
+  if(frames.length===0){removeThinking();isProcessing=false;addMsg('لم أتمكن من استخراج أي لقطة من الفيديو.','bot');return}
+  showToast('📤 إرسال '+frames.length+' لقطة للتحليل...');
+  var prompt=text||'حلل هذه اللقطات من فيديو ('+frames.length+' لقطات). صف ما يحدث بدقة وموضوعية. لا تخمن أسماء الأفلام أو المسلسلات.';
   var parts=[{text:prompt}];
   frames.forEach(function(f){parts.push({inline_data:{mime_type:'image/jpeg',data:f.split(',')[1]}})});
   var body={contents:[{parts:parts}],generationConfig:{temperature:0.4,maxOutputTokens:4096}};
@@ -701,7 +729,7 @@ function sendVideoFrames(text,frames){
     if(data.error){addMsg('خطأ Gemini: '+data.error.message,'bot');return}
     var reply=data.candidates[0].content.parts[0].text;addMsg(reply,'bot');speak(reply);
   })
-  .catch(function(){removeThinking();isProcessing=false;addMsg('تعذر تحليل الفيديو.','bot')});
+  .catch(function(){removeThinking();isProcessing=false;addMsg('تعذر تحليل الفيديو. تحقق من مفتاح Gemini API.','bot')});
 }
 
 function clearChat(){
